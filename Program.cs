@@ -112,13 +112,18 @@ class Program
 
     private async Task Process(DeploymentProcessor processor, CommandLineOptions options, CancellationToken cancellationToken, CancellationTokenSource onComplete)
     {
-        await processor.ProcessAsync(
-            subscriptionId: options.SubscriptionId,
-            resourceGroupName: options.ResourceGroup,
-            bicepParamPath: options.File,
-            cancellationToken: cancellationToken);
-
-        await onComplete.CancelAsync();
+        try
+        {
+            await processor.ProcessAsync(
+                subscriptionId: options.SubscriptionId,
+                resourceGroupName: options.ResourceGroup,
+                bicepParamPath: options.File,
+                cancellationToken: cancellationToken);            
+        }
+        finally
+        {
+            await onComplete.CancelAsync();
+        }
     }
 
     private static async Task<int> RunWithCancellationAsync(Func<CancellationToken, Task<int>> runFunc)

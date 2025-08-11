@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "name": "CLI",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "Build Solution",
+            "program": "bin/Debug/net9.0/CliTest",
+            "args": [
+                "--subscription-id",
+                "a1bfa635-f2bf-42f1-86b5-848c674fc321",
+                "--resource-group",
+                "ant-test",
+                "--file",
+                "/Users/ant/Code/bicep/src/Bicep.Core.Samples/Files/user_submitted/301/nested-vms-in-virtual-network/main.bicepparam"
+            ],
+            "console": "internalConsole",
+            "stopAtEntry": false
+        }
+    ]
+}
