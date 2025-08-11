@@ -7,4 +7,12 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Azure.Deployments.ClientTools" Version="1.454.0" />
+    <PackageReference Include="Azure.Identity" Version="1.14.2" />
+    <PackageReference Include="Azure.ResourceManager.Resources" Version="1.11.0" />
+    <PackageReference Include="CommandLineParser" Version="2.9.1" />
+    <PackageReference Include="Microsoft.Extensions.Azure" Version="1.12.0" />
+  </ItemGroup>
+
 </Project>

@@ -1,120 +1,149 @@
 ﻿// See https://aka.ms/new-console-template for more information
 using System.Collections.Immutable;
+using Azure.Deployments.ClientTools;
+using Azure.Identity;
+using Azure.ResourceManager.Resources;
 using CliTest;
+using CommandLine;
+using Microsoft.Extensions.Azure;
+using Microsoft.Extensions.DependencyInjection;
 
-CancellationTokenSource cts = new();
-Console.CancelKeyPress += delegate (object? sender, ConsoleCancelEventArgs e)
-{
-    e.Cancel = false;
-    cts.Cancel();
-};
+namespace CliTest;
 
-var lineCount = 0;
-var startTime = DateTime.UtcNow;
-while (true)
+public class CommandLineOptions
 {
-    if (cts.Token.IsCancellationRequested)
+    public CommandLineOptions(string subscriptionId, string resourceGroup, string file)
     {
-        break;
+        SubscriptionId = subscriptionId;
+        ResourceGroup = resourceGroup;
+        File = file;
     }
 
-    var deployments = DeploymentSimulator.Simulate(startTime);
+    [Option("subscription-id", Required = true, HelpText = "The target Azure subscription ID.")]
+    public string SubscriptionId { get; }
 
-    Console.Write(Renderer.HideCursor);
-    var output = Renderer.Render(deployments, lineCount);
-    lineCount = output.Count(c => c == '\n');
-    Console.Write(output);
-    Console.Write(Renderer.ShowCursor);
+    [Option("resource-group", Required = true, HelpText = "The target Azure resource group name.")]
+    public string ResourceGroup { get; }
 
-    if (deployments.SelectMany(d => d.Operations).All(op => op.EndTime != null))
-    {
-        break;
-    }
-
-    Thread.Sleep(50);
+    [Option("file", Required = true, HelpText = "The path to the .bicepparam file.")]
+    public string File { get; }
 }
 
-public static class DeploymentSimulator
+class Program
 {
-    public static ImmutableArray<Deployment> Simulate(DateTime startTime)
+    public static async Task<int> Main(string[] args)
     {
-        Deployment[] deployments = [
-            new() {
-                Id = "/deployments/RootDeployment",
-                Name = "RootDeployment",
-                IsEntryPoint = true,
-                Operations = [
-                    new() {
-                        Id = "/resourceGroups/MyResourceGroup",
-                        Name = "MyResourceGroup",
-                        Type = "Microsoft.Resources/resourceGroups",
-                        State = "Succeeded",
-                        StartTime = startTime,
-                        EndTime = startTime.AddMilliseconds(2359),
-                    },
-                    new() {
-                        Id = "/deployments/NestedDeployment1",
-                        Name = "NestedDeployment1",
-                        Type = "Microsoft.Resources/deployments",
-                        State = "Succeeded",
-                        StartTime = startTime.AddMilliseconds(1294),
-                        EndTime = startTime.AddSeconds(2),
-                    },
-                    new() {
-                        Id = "/deployments/NestedDeployment2",
-                        Name = "NestedDeployment2",
-                        Type = "Microsoft.Resources/deployments",
-                        State = "Failed",
-                        StartTime = startTime.AddMilliseconds(9823),
-                        EndTime = startTime.AddSeconds(11),
-                        Error = "Some error occurred"
-                    }
-                ],
-            },
-            new() {
-                Id = "/deployments/NestedDeployment1",
-                Name = "NestedDeployment1",
-                IsEntryPoint = false,
-                Operations = [
-                    new() {
-                        Id = "/virtualMachines/MyVm",
-                        Name = "MyVm",
-                        Type = "Microsoft.Compute/virtualMachines",
-                        State = "Succeeded",
-                        StartTime = startTime.AddMilliseconds(423),
-                        EndTime = startTime.AddSeconds(5)
-                    }
-                ],
-            },
-            new() {
-                Id = "/deployments/NestedDeployment2",
-                Name = "NestedDeployment2",
-                IsEntryPoint = false,
-                Operations = [
-                    new() {
-                        Id = "/storageAccounts/MyStorageAccount",
-                        Name = "MyStorageAccount",
-                        Type = "Microsoft.Storage/storageAccounts",
-                        State = "Failed",
-                        StartTime = startTime.AddMilliseconds(1248),
-                        EndTime = startTime.AddSeconds(13),
-                        Error = "Quota exceeded"
-                    }
-                ],
-            },
-        ];
+        var program = new Program();
 
-        var timeNow = DateTime.UtcNow;
+        return await RunWithCancellationAsync(token => program.Main(args, token));
+    }
 
-        return [.. deployments
-            .Select(d => d with
-            {
-                Operations = [.. d.Operations.Where(x => x.StartTime < timeNow).Select(op => op with
-                {
-                    State = op.EndTime < timeNow ? op.State : "Running",
-                    EndTime = op.EndTime < timeNow ? op.EndTime : null,
-                    Error = op.EndTime < timeNow ? op.Error : null,
-                })],
-            })];
+    private async Task<int> Main(string[] args, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Parser.Default.ParseArguments<CommandLineOptions>(args)
+                .MapResult(
+                    opts => Run(opts, cancellationToken),
+                    async errors =>
+                    {
+                        foreach (var error in errors)
+                        {
+                            await Console.Error.WriteLineAsync(error.ToString());
+                        }
+
+                        return 1;
+                    });
+
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            await Console.Error.WriteAsync(ex.ToString());
+            return 1;
+        }
+    }
+
+    private async Task<int> Run(CommandLineOptions options, CancellationToken cancellationToken)
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton<DeploymentProcessor>();
+
+        services.AddAzureClients(clientBuilder =>
+        {
+            clientBuilder.AddArmClient("00000000-0000-0000-0000-000000000000");
+            clientBuilder.UseCredential(new DefaultAzureCredential());
+        });
+
+        // Initialize BicepClient synchronously for DI registration
+        var version = "0.37.4";
+        var homePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            $".bicep/bin/{version}/bicep");
+        if (!Directory.Exists(homePath))
+        {
+            Directory.CreateDirectory(homePath);
+            await BicepClient.DownloadAndInstall(homePath, bicepVersion: version, cancellationToken: cancellationToken);
+        }
+
+        var exeName = OperatingSystem.IsWindows() ? "bicep.exe" : "bicep";
+        var path = Path.Combine(homePath, exeName);
+
+        var bicepClient = await BicepClient.Initialize(path, cancellationToken);
+        services.AddSingleton<BicepClient>(bicepClient);
+        services.AddSingleton<DeploymentProcessor>();
+        services.AddSingleton<Renderer>();
+
+        var provider = services.BuildServiceProvider();
+
+        var onComplete = new CancellationTokenSource();
+        await Task.WhenAll([
+            RenderLoop(provider.GetRequiredService<Renderer>(), onComplete.Token),
+            Process(provider.GetRequiredService<DeploymentProcessor>(), options, cancellationToken, onComplete),
+        ]);
+
+        return 0;
+    }
+    
+    private async Task RenderLoop(Renderer renderer, CancellationToken cancellationToken)
+    {
+        await renderer.RenderLoop(TimeSpan.FromMilliseconds(50), cancellationToken);
+    }
+
+    private async Task Process(DeploymentProcessor processor, CommandLineOptions options, CancellationToken cancellationToken, CancellationTokenSource onComplete)
+    {
+        await processor.ProcessAsync(
+            subscriptionId: options.SubscriptionId,
+            resourceGroupName: options.ResourceGroup,
+            bicepParamPath: options.File,
+            cancellationToken: cancellationToken);
+
+        await onComplete.CancelAsync();
+    }
+
+    private static async Task<int> RunWithCancellationAsync(Func<CancellationToken, Task<int>> runFunc)
+    {
+        var cancellationTokenSource = new CancellationTokenSource();
+
+        Console.CancelKeyPress += (sender, e) =>
+        {
+            cancellationTokenSource.Cancel();
+            e.Cancel = true;
+        };
+
+        AppDomain.CurrentDomain.ProcessExit += (sender, e) =>
+        {
+            cancellationTokenSource.Cancel();
+        };
+
+        try
+        {
+            return await runFunc(cancellationTokenSource.Token);
+        }
+        catch (OperationCanceledException exception) when (exception.CancellationToken == cancellationTokenSource.Token)
+        {
+            // this is expected - no need to rethrow
+            return 1;
+        }
     }
 }
